@@ -16,6 +16,8 @@ link normalization, and Mermaid diagram safety.
 - Sanitizes Mermaid node labels by removing unsupported markdown lists/links.
 - Conservatively moves Yes/No branch labels to the correct edge when there is
   a real branching node and the target edge is unlabeled.
+- Applies ordinal numbering based on the README list and updates links to the
+  renamed files.
 
 ## Usage
 

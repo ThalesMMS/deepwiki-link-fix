@@ -331,6 +331,89 @@ def process_text(text: str) -> str:
     return text
 
 
+def parse_readme_index(readme_path: Path) -> list[str]:
+    lines = readme_path.read_text().splitlines()
+    items: list[str] = []
+    for line in lines:
+        match = re.match(r"^\s*-\s+\[[^\]]+\]\(([^)]+)\)\s*$", line)
+        if not match:
+            continue
+        target = match.group(1)
+        if target.startswith("http://") or target.startswith("https://"):
+            continue
+        if not target.lower().endswith(".md"):
+            continue
+        items.append(target)
+    return items
+
+
+def build_ordinal_mapping(readme_path: Path) -> dict[str, str]:
+    items = parse_readme_index(readme_path)
+    mapping: dict[str, str] = {}
+    for idx, target in enumerate(items, start=1):
+        target_path = Path(target)
+        new_name = f"{idx}-{target_path.name}"
+        new_path = str(target_path.with_name(new_name))
+        mapping[target] = new_path
+    return mapping
+
+
+def rewrite_markdown_links(text: str, mapping: dict[str, str]) -> str:
+    def repl(match: re.Match[str]) -> str:
+        target = match.group(1)
+        if target.startswith("http://") or target.startswith("https://"):
+            return match.group(0)
+        anchor = ""
+        if "#" in target:
+            target, anchor = target.split("#", 1)
+            anchor = f"#{anchor}"
+        prefix = ""
+        while target.startswith("../"):
+            prefix += "../"
+            target = target[3:]
+        if target.startswith("./"):
+            prefix += "./"
+            target = target[2:]
+        new_target = mapping.get(target)
+        if not new_target:
+            return match.group(0)
+        return f"]({prefix}{new_target}{anchor})"
+
+    return re.sub(r"\]\(([^)]+)\)", repl, text)
+
+
+def apply_readme_ordinal(output_dir: Path, dry_run: bool) -> list[Path]:
+    readme_path = output_dir / "README.md"
+    if not readme_path.exists():
+        return []
+
+    mapping = build_ordinal_mapping(readme_path)
+    if not mapping:
+        return []
+
+    changed: list[Path] = []
+    markdown_files = list(output_dir.rglob("*.md"))
+    for path in markdown_files:
+        original = path.read_text()
+        updated = rewrite_markdown_links(original, mapping)
+        if updated != original:
+            changed.append(path)
+            if not dry_run:
+                path.write_text(updated)
+
+    for old, new in mapping.items():
+        old_path = (output_dir / old).resolve()
+        new_path = (output_dir / new).resolve()
+        if old_path == new_path:
+            continue
+        if old_path.exists():
+            changed.append(new_path)
+            if not dry_run:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                old_path.rename(new_path)
+    return changed
+
+
 def process_directory(input_dir: Path, output_dir: Path, dry_run: bool) -> list[Path]:
     changed_files: list[Path] = []
     for path in input_dir.rglob("*"):
@@ -352,6 +435,7 @@ def process_directory(input_dir: Path, output_dir: Path, dry_run: bool) -> list[
         if not dry_run:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(updated)
+    changed_files.extend(apply_readme_ordinal(output_dir, dry_run))
     return changed_files
 
 
