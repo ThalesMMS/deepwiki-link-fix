@@ -332,7 +332,10 @@ def process_text(text: str) -> str:
 
 
 def parse_readme_index(readme_path: Path) -> list[str]:
-    lines = readme_path.read_text().splitlines()
+    text = readme_path.read_text()
+    # Fix broken links by removing newlines within markdown links
+    text = re.sub(r'\]\([^)]*\n[^)]*\)', lambda m: m.group(0).replace('\n', ''), text)
+    lines = text.splitlines()
     items: list[str] = []
     for line in lines:
         match = re.match(r"^\s*-\s+\[[^\]]+\]\(([^)]+)\)\s*$", line)
@@ -352,7 +355,7 @@ def build_ordinal_mapping(readme_path: Path) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for idx, target in enumerate(items, start=1):
         target_path = Path(target)
-        new_name = f"{idx}-{target_path.name}"
+        new_name = f"{idx:02d}-{target_path.name}"
         new_path = str(target_path.with_name(new_name))
         mapping[target] = new_path
     return mapping
@@ -386,6 +389,12 @@ def apply_readme_ordinal(output_dir: Path, dry_run: bool) -> list[Path]:
     readme_path = output_dir / "README.md"
     if not readme_path.exists():
         return []
+
+    # Clean up the README first to fix broken links
+    original_readme = readme_path.read_text()
+    cleaned_readme = process_text(original_readme)
+    if cleaned_readme != original_readme and not dry_run:
+        readme_path.write_text(cleaned_readme)
 
     mapping = build_ordinal_mapping(readme_path)
     if not mapping:
@@ -435,7 +444,11 @@ def process_directory(input_dir: Path, output_dir: Path, dry_run: bool) -> list[
         if not dry_run:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(updated)
-    changed_files.extend(apply_readme_ordinal(output_dir, dry_run))
+    
+    # Apply ordinal renaming to each subdirectory that has a README.md
+    for readme_path in output_dir.rglob("README.md"):
+        changed_files.extend(apply_readme_ordinal(readme_path.parent, dry_run))
+    
     return changed_files
 
 
