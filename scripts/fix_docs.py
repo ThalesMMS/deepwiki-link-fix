@@ -129,6 +129,15 @@ def remove_link_copied(text: str) -> str:
     return LINK_COPIED_RE.sub("", text)
 
 
+def remove_ask_devin_lines(text: str) -> str:
+    lines = text.splitlines()
+    filtered_lines = [line for line in lines if not line.strip().startswith("Ask Devin about")]
+    result = "\n".join(filtered_lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
 def contains_list_marker(label: str) -> bool:
     parts = re.split(r"<br\s*/?>", label)
     for part in parts:
@@ -324,6 +333,7 @@ def sanitize_mermaid(text: str) -> str:
 def process_text(text: str) -> str:
     text = strip_preamble(text)
     text = remove_link_copied(text)
+    text = remove_ask_devin_lines(text)
     text = fix_internal_links(text)
     text = fix_section_links(text)
     text = strip_github_blob_sha(text)

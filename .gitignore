@@ -4,3 +4,4 @@
 !/input/**/.gitkeep
 !/output/**/.gitkeep
 /temp/docs
+/scripts/__pycache__
