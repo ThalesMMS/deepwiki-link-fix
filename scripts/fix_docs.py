@@ -365,7 +365,12 @@ def build_ordinal_mapping(readme_path: Path) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for idx, target in enumerate(items, start=1):
         target_path = Path(target)
-        new_name = f"{idx:02d}-{target_path.name}"
+        # Check if filename already starts with a number (like "01-Overview.md")
+        filename = target_path.name
+        if re.match(r'^\d{2}-', filename):
+            # Skip renaming if already numbered
+            continue
+        new_name = f"{idx:02d}-{filename}"
         new_path = str(target_path.with_name(new_name))
         mapping[target] = new_path
     return mapping
