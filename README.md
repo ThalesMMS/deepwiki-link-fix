@@ -1,7 +1,7 @@
 # Markdown Cleanup Script
 
-This repository contains a small Python script that cleans up Markdown files
-exported from deepwiki.com and devin.ai. It focuses on formatting artifacts,
+This repository contains tools (Python and Rust) that clean up Markdown files
+exported from deepwiki.com and devin.ai. They focus on formatting artifacts,
 link normalization, and Mermaid diagram safety.
 
 ## What it fixes
@@ -21,6 +21,24 @@ link normalization, and Mermaid diagram safety.
 
 ## Usage
 
+### Rust (recommended)
+
+```bash
+# Default: ./input → ./output
+cargo run
+
+# Custom directories
+cargo run -- ./input_dir ./output_dir
+
+# Rewrite files in place
+cargo run -- --in-place ./input_dir
+
+# See what would change without writing
+cargo run -- --dry-run ./input_dir ./output_dir
+```
+
+### Python
+
 ```bash
 # Write output to a new directory
 python3 scripts/fix_docs.py input_dir output_dir
@@ -32,11 +50,20 @@ python3 scripts/fix_docs.py --in-place input_dir
 python3 scripts/fix_docs.py --dry-run input_dir output_dir
 ```
 
+## Testing
+
+Run the parity test to verify Python and Rust produce identical output:
+
+```bash
+./tests/test_parity.sh
+```
+
 ## Notes
 
 - Only `.md` files are modified; other files are copied as-is.
 - Mermaid changes are intentionally conservative to avoid altering correct
   diagrams.
+- Both implementations produce byte-identical output.
 
 ## License
 
