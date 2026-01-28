@@ -37,6 +37,36 @@ cargo run -- --in-place ./input_dir
 cargo run -- --dry-run ./input_dir ./output_dir
 ```
 
+### PDF Conversion (Rust only)
+
+Convert processed markdown projects to consolidated PDFs:
+
+```bash
+# Convert all projects in ./output to PDFs in ./output-pdf
+cargo run -- --pdf
+
+# Custom PDF output directory
+cargo run -- --pdf --pdf-dir ./my-pdfs
+```
+
+**Requirements:**
+- [pandoc](https://pandoc.org/) - for markdown to PDF conversion
+- [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) (optional) - for rendering mermaid diagrams
+
+```bash
+# Install pandoc (macOS)
+brew install pandoc
+
+# Install mermaid-cli (optional, for diagram rendering)
+npm install -g @mermaid-js/mermaid-cli
+```
+
+Each project folder in `output/` becomes a single PDF with:
+- Title page with project name
+- Table of contents
+- All markdown files consolidated in order
+- Mermaid diagrams rendered as images (if mermaid-cli is installed)
+
 ### Python
 
 ```bash

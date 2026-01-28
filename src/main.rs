@@ -3,6 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -24,6 +25,14 @@ struct Args {
     /// Print files that would change without writing output
     #[arg(long)]
     dry_run: bool,
+
+    /// Convert output projects to PDF (requires output folder to exist)
+    #[arg(long)]
+    pdf: bool,
+
+    /// Output directory for PDF files (default: ./output-pdf)
+    #[arg(long, default_value = "./output-pdf")]
+    pdf_dir: PathBuf,
 }
 
 // Section anchors mapping
@@ -641,9 +650,304 @@ fn process_directory(input_dir: &Path, output_dir: &Path, dry_run: bool) -> Vec<
     changed_files
 }
 
+/// Check if pandoc is available
+fn pandoc_available() -> bool {
+    Command::new("pandoc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if mermaid-cli (mmdc) is available
+fn mmdc_available() -> bool {
+    Command::new("mmdc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Render a mermaid diagram to PNG using mmdc
+fn render_mermaid_to_png(mermaid_code: &str, output_path: &Path) -> Result<(), String> {
+    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let input_file = temp_dir.path().join("diagram.mmd");
+
+    fs::write(&input_file, mermaid_code).map_err(|e| e.to_string())?;
+
+    let output = Command::new("mmdc")
+        .args([
+            "-i", input_file.to_str().unwrap(),
+            "-o", output_path.to_str().unwrap(),
+            "-b", "white",
+            "-t", "default",
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+/// Extract mermaid blocks from markdown and render them to images
+fn process_mermaid_for_pdf(text: &str, images_dir: &Path, prefix: &str) -> String {
+    let mut result = String::new();
+    let mut diagram_count = 0;
+    let mut in_mermaid = false;
+    let mut mermaid_content = String::new();
+    let has_mmdc = mmdc_available();
+
+    for line in text.lines() {
+        if line.starts_with("```") && line.contains("mermaid") {
+            in_mermaid = true;
+            mermaid_content.clear();
+            continue;
+        }
+
+        if in_mermaid {
+            if line.starts_with("```") {
+                in_mermaid = false;
+                diagram_count += 1;
+
+                if has_mmdc {
+                    let img_name = format!("{}-diagram-{}.png", prefix, diagram_count);
+                    let img_path = images_dir.join(&img_name);
+
+                    match render_mermaid_to_png(&mermaid_content, &img_path) {
+                        Ok(_) => {
+                            result.push_str(&format!("\n![Diagram {}]({})\n\n",
+                                diagram_count, img_path.display()));
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to render mermaid diagram: {}", e);
+                            result.push_str("\n```\n");
+                            result.push_str(&mermaid_content);
+                            result.push_str("\n```\n\n");
+                        }
+                    }
+                } else {
+                    // No mmdc available, keep as code block
+                    result.push_str("\n```\n");
+                    result.push_str(&mermaid_content);
+                    result.push_str("\n```\n\n");
+                }
+                mermaid_content.clear();
+            } else {
+                mermaid_content.push_str(line);
+                mermaid_content.push('\n');
+            }
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result
+}
+
+/// Get sorted markdown files from a project directory (excluding README.md)
+fn get_sorted_markdown_files(project_dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(project_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().map_or(false, |e| e == "md") &&
+            p.file_name().map_or(false, |f| f != "README.md")
+        })
+        .collect();
+
+    files.sort_by(|a, b| {
+        a.file_name().cmp(&b.file_name())
+    });
+
+    files
+}
+
+/// Consolidate all markdown files in a project into a single document
+fn consolidate_project_markdown(project_dir: &Path, images_dir: &Path) -> String {
+    let mut consolidated = String::new();
+
+    // Read README if exists and add as intro
+    let readme_path = project_dir.join("README.md");
+    if readme_path.exists() {
+        if let Ok(readme_content) = fs::read_to_string(&readme_path) {
+            // Skip the first header if it exists (to avoid duplicate titles)
+            let content = if readme_content.trim_start().starts_with('#') {
+                let lines: Vec<&str> = readme_content.lines().collect();
+                if lines.len() > 1 {
+                    lines[1..].join("\n")
+                } else {
+                    String::new()
+                }
+            } else {
+                readme_content
+            };
+
+            let processed = process_mermaid_for_pdf(&content, images_dir, "readme");
+            consolidated.push_str(&processed);
+            consolidated.push_str("\n\n---\n\n");
+        }
+    }
+
+    // Process each markdown file in order
+    let files = get_sorted_markdown_files(project_dir);
+
+    for (idx, file_path) in files.iter().enumerate() {
+        if let Ok(content) = fs::read_to_string(file_path) {
+            let file_stem = file_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("section");
+
+            let prefix = format!("sec{}-{}", idx + 1, file_stem);
+            let processed = process_mermaid_for_pdf(&content, images_dir, &prefix);
+
+            consolidated.push_str(&processed);
+            consolidated.push_str("\n\n---\n\n");
+        }
+    }
+
+    consolidated
+}
+
+/// Convert a project directory to a single PDF using pandoc
+fn convert_project_to_pdf(project_dir: &Path, pdf_dir: &Path) -> Result<PathBuf, String> {
+    let project_name = project_dir.file_name()
+        .and_then(|f| f.to_str())
+        .ok_or("Invalid project directory name")?;
+
+    // Create temporary directory for images and markdown
+    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let images_dir = temp_dir.path();
+
+    // Consolidate all markdown files
+    let consolidated = consolidate_project_markdown(project_dir, images_dir);
+
+    // Write consolidated markdown to temp file
+    let md_path = temp_dir.path().join("consolidated.md");
+    fs::write(&md_path, &consolidated).map_err(|e| e.to_string())?;
+
+    // Create output PDF path
+    let pdf_path = pdf_dir.join(format!("{}.pdf", project_name));
+
+    // Write custom title page template
+    let title_path = temp_dir.path().join("title.tex");
+    let title_template = format!(r#"\begin{{titlepage}}
+\centering
+\vspace*{{3cm}}
+{{\fontsize{{32}}{{40}}\selectfont\bfseries {} \par}}
+\vfill
+\end{{titlepage}}
+"#, project_name.replace('_', r"\_").replace('-', r"-"));
+    fs::write(&title_path, &title_template).map_err(|e| e.to_string())?;
+
+    // Convert to PDF using pandoc
+    let output = Command::new("pandoc")
+        .args([
+            md_path.to_str().unwrap(),
+            "-o", pdf_path.to_str().unwrap(),
+            "--pdf-engine=xelatex",
+            "-V", "geometry:margin=1in",
+            "-V", "mainfont:Helvetica",
+            "-V", "monofont:Menlo",
+            "-V", "fontsize=11pt",
+            "-B", title_path.to_str().unwrap(),
+            "--toc",
+            "--toc-depth=2",
+            "-f", "markdown+emoji",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run pandoc: {}", e))?;
+
+    if output.status.success() {
+        Ok(pdf_path)
+    } else {
+        Err(format!("Pandoc failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Process all projects in output directory and convert to PDFs
+fn process_projects_to_pdf(output_dir: &Path, pdf_dir: &Path) -> Vec<PathBuf> {
+    // Create pdf_dir if it doesn't exist
+    if let Err(e) = fs::create_dir_all(pdf_dir) {
+        eprintln!("Error creating PDF output directory: {}", e);
+        return Vec::new();
+    }
+
+    let mut generated_pdfs = Vec::new();
+
+    // Find all project directories (directories containing README.md or .md files)
+    for entry in fs::read_dir(output_dir).into_iter().flatten().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Check if it's a project directory (has markdown files)
+        let has_md_files = fs::read_dir(&path)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().map_or(false, |ext| ext == "md"));
+
+        if !has_md_files {
+            continue;
+        }
+
+        let project_name = path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown");
+
+        println!("Converting project: {}", project_name);
+
+        match convert_project_to_pdf(&path, pdf_dir) {
+            Ok(pdf_path) => {
+                println!("  Created: {}", pdf_path.display());
+                generated_pdfs.push(pdf_path);
+            }
+            Err(e) => {
+                eprintln!("  Error: {}", e);
+            }
+        }
+    }
+
+    generated_pdfs
+}
+
 fn main() {
     let args = Args::parse();
-    
+
+    // Handle --pdf mode: only convert existing output to PDF
+    if args.pdf {
+        let output_dir = args.output_dir.clone().unwrap_or_else(|| PathBuf::from("./output"));
+
+        if !output_dir.exists() {
+            eprintln!("Error: Output directory '{}' does not exist. Run without --pdf first to generate markdown.", output_dir.display());
+            std::process::exit(1);
+        }
+
+        if !pandoc_available() {
+            eprintln!("Error: pandoc is required for PDF conversion but was not found.");
+            eprintln!("Install with: brew install pandoc (macOS) or apt install pandoc (Linux)");
+            std::process::exit(1);
+        }
+
+        if !mmdc_available() {
+            eprintln!("Warning: mermaid-cli (mmdc) not found. Mermaid diagrams will be shown as code blocks.");
+            eprintln!("Install with: npm install -g @mermaid-js/mermaid-cli");
+        }
+
+        println!("Converting projects to PDF...");
+        let pdfs = process_projects_to_pdf(&output_dir, &args.pdf_dir);
+        println!("\nGenerated {} PDF file(s)", pdfs.len());
+        return;
+    }
+
     let output_dir = if args.in_place {
         args.input_dir.clone()
     } else {
@@ -655,9 +959,9 @@ fn main() {
             }
         }
     };
-    
+
     let changed = process_directory(&args.input_dir, &output_dir, args.dry_run);
-    
+
     if args.dry_run {
         for path in changed {
             println!("{}", path.display());

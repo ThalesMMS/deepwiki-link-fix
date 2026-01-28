@@ -7,3 +7,4 @@ edition = "2021"
 regex = "1"
 walkdir = "2"
 clap = { version = "4", features = ["derive"] }
+tempfile = "3"
