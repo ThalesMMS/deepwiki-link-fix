@@ -151,6 +151,12 @@ fn remove_ask_devin_lines(text: &str) -> String {
     result
 }
 
+fn fix_literal_backslash_n(text: &str) -> String {
+    // Replace literal \n (backslash followed by n) with actual newlines
+    // This fixes corrupted content from DeepWiki exports
+    text.replace("\\n", "\n")
+}
+
 fn contains_list_marker(label: &str) -> bool {
     let list_item_re = Regex::new(r"^\s*(?:\d+\.\s+|[-*+]\s+)").unwrap();
     let parts: Vec<&str> = Regex::new(r"<br\s*/?>")
@@ -426,6 +432,7 @@ fn process_text(text: &str) -> String {
     let text = strip_preamble(text);
     let text = remove_link_copied(&text);
     let text = remove_ask_devin_lines(&text);
+    let text = fix_literal_backslash_n(&text);
     let text = fix_internal_links(&text);
     let text = fix_section_links(&text);
     let text = strip_github_blob_sha(&text);
