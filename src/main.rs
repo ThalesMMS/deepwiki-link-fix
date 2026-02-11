@@ -182,6 +182,64 @@ fn sanitize_label(label: &str) -> String {
     result.to_string()
 }
 
+fn fix_sequence_diagram_participants(lines: &[String]) -> Vec<String> {
+    let participant_re = Regex::new(r"^\s*(participant)\s+(.+)$").unwrap();
+    let mut participant_aliases: HashMap<String, String> = HashMap::new();
+    let mut result: Vec<String> = Vec::new();
+    
+    // First pass: identify participants with spaces and create aliases
+    for line in lines {
+        if let Some(caps) = participant_re.captures(line) {
+            let original_name = caps.get(2).unwrap().as_str().trim();
+            if original_name.contains(' ') || original_name.contains('-') {
+                // Create safe alias
+                let safe_alias = original_name
+                    .replace(' ', "_")
+                    .replace('-', "_");
+                participant_aliases.insert(original_name.to_string(), safe_alias.clone());
+            }
+        }
+    }
+    
+    // Second pass: replace in all lines
+    for line in lines {
+        let mut new_line = line.clone();
+        
+        // Replace participant declarations
+        if let Some(caps) = participant_re.captures(&new_line) {
+            let original_name = caps.get(2).unwrap().as_str().trim();
+            if let Some(safe_alias) = participant_aliases.get(original_name) {
+                new_line = format!("  participant {} as {}", safe_alias, original_name);
+            }
+        } else {
+            // Replace in message arrows
+            for (original, safe) in &participant_aliases {
+                new_line = new_line.replace(original, safe);
+            }
+        }
+        
+        result.push(new_line);
+    }
+    
+    result
+}
+
+fn fix_malformed_nodes(lines: &[String]) -> Vec<String> {
+    // Fix patterns like INPUTENC[broken-content]"] - specific to broken DeepWiki exports
+    let broken_re = Regex::new(r#"(\w+)\[broken-content\]\"\]"#).unwrap();
+    
+    lines
+        .iter()
+        .map(|line| {
+            broken_re.replace_all(line, |caps: &regex::Captures| {
+                let node_id = &caps[1];
+                // Replace with node ID as the label
+                format!(r#"{}["{}"]"#, node_id, node_id)
+            }).to_string()
+        })
+        .collect()
+}
+
 fn sanitize_node_labels(lines: &[String]) -> Vec<String> {
     let node_label_re = Regex::new(r#"\["(.*?)"\]"#).unwrap();
     lines
@@ -371,6 +429,7 @@ fn move_branch_labels(lines: &mut Vec<String>) {
 
 fn sanitize_mermaid_block(lines: &[String]) -> Vec<String> {
     let mut lines = sanitize_node_labels(lines);
+    lines = fix_malformed_nodes(&lines);
     
     let mut block_type = None;
     for line in &lines {
@@ -380,12 +439,16 @@ fn sanitize_mermaid_block(lines: &[String]) -> Vec<String> {
         }
         if stripped.starts_with("flowchart") || stripped.starts_with("graph") {
             block_type = Some("flowchart");
+        } else if stripped.starts_with("sequenceDiagram") {
+            block_type = Some("sequence");
         }
         break;
     }
     
     if block_type == Some("flowchart") {
         move_branch_labels(&mut lines);
+    } else if block_type == Some("sequence") {
+        lines = fix_sequence_diagram_participants(&lines);
     }
     
     lines
@@ -428,6 +491,180 @@ fn sanitize_mermaid(text: &str) -> String {
     result
 }
 
+fn fix_table_content(text: &str) -> String {
+    let mut result = String::new();
+    let mut in_table = false;
+    let mut table_rows: Vec<String> = Vec::new();
+    
+    for line in text.lines() {
+        // Detectar tabelas markdown
+        if line.trim().starts_with('|') {
+            if !in_table {
+                in_table = true;
+                table_rows.clear();
+            }
+            table_rows.push(line.to_string());
+            continue;
+        } else if in_table && (line.trim().is_empty() || line.trim().starts_with('|')) {
+            if line.trim().starts_with('|') {
+                table_rows.push(line.to_string());
+                continue;
+            } else {
+                // Fim da tabela
+                in_table = false;
+                let fixed_table = fix_table_rows(&table_rows);
+                result.push_str(&fixed_table);
+                result.push('\n');
+                table_rows.clear();
+            }
+        } else if in_table {
+            // Fim da tabela
+            in_table = false;
+            let fixed_table = fix_table_rows(&table_rows);
+            result.push_str(&fixed_table);
+            result.push('\n');
+            table_rows.clear();
+        }
+        
+        if !in_table {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    
+    // Se terminou com tabela aberta
+    if in_table && !table_rows.is_empty() {
+        let fixed_table = fix_table_rows(&table_rows);
+        result.push_str(&fixed_table);
+    }
+    
+    result
+}
+
+fn fix_table_rows(rows: &[String]) -> String {
+    let mut result = String::new();
+    
+    for row in rows {
+        if row.trim().starts_with('|') {
+            let columns: Vec<&str> = row.split('|').collect();
+            let mut fixed_columns: Vec<String> = Vec::new();
+            
+            for (i, col) in columns.iter().enumerate() {
+                if i == 0 || i == columns.len() - 1 {
+                    // Primeira e última coluna são vazias (antes/after do |)
+                    continue;
+                }
+                
+                let col_content = col.trim();
+                
+                // Quebrar colunas muito longas
+                if col_content.len() > 30 {
+                    let words: Vec<&str> = col_content.split_whitespace().collect();
+                    let mut current_line = String::new();
+                    let mut lines = Vec::new();
+                    
+                    for word in words {
+                        if current_line.is_empty() {
+                            current_line.push_str(word);
+                        } else if current_line.len() + 1 + word.len() <= 30 {
+                            current_line.push(' ');
+                            current_line.push_str(word);
+                        } else {
+                            lines.push(current_line);
+                            current_line = word.to_string();
+                        }
+                    }
+                    
+                    if !current_line.is_empty() {
+                        lines.push(current_line);
+                    }
+                    
+                    // Juntar linhas com <br> para quebra no PDF
+                    fixed_columns.push(lines.join("<br>"));
+                } else {
+                    fixed_columns.push(col_content.to_string());
+                }
+            }
+            
+            // Reconstruir linha da tabela
+            result.push_str("|");
+            for col in &fixed_columns {
+                result.push(' ');
+                result.push_str(col);
+                result.push_str(" |");
+            }
+            result.push('\n');
+        } else {
+            // Linha de separação (|---|---|)
+            result.push_str(row);
+            result.push('\n');
+        }
+    }
+    
+    result
+}
+
+fn fix_long_lines(text: &str) -> String {
+    let mut result = String::new();
+    let max_line_length = 80; // Limite de caracteres por linha
+    let mut in_code_block = false;
+    
+    for line in text.lines() {
+        // Detectar início/fim de blocos de código
+        if line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        
+        // Para blocos de código, quebrar linhas muito longas
+        if in_code_block && line.len() > max_line_length {
+            // Para código, quebrar em pontos lógicos ou simplesmente no limite
+            if line.len() > max_line_length * 2 {
+                // Linhas extremamente longas - quebrar no limite
+                for (i, chunk) in line.as_bytes().chunks(max_line_length).enumerate() {
+                    if i > 0 {
+                        result.push('\n');
+                    }
+                    result.push_str(&String::from_utf8_lossy(chunk));
+                }
+                result.push('\n');
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else if !in_code_block && line.len() > max_line_length {
+            // Texto normal - quebrar em palavras
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let mut current_line = String::new();
+            
+            for word in words {
+                if current_line.is_empty() {
+                    current_line.push_str(word);
+                } else if current_line.len() + 1 + word.len() <= max_line_length {
+                    current_line.push(' ');
+                    current_line.push_str(word);
+                } else {
+                    result.push_str(&current_line);
+                    result.push('\n');
+                    current_line = word.to_string();
+                }
+            }
+            
+            if !current_line.is_empty() {
+                result.push_str(&current_line);
+                result.push('\n');
+            }
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    
+    result
+}
+
 fn process_text(text: &str) -> String {
     let text = strip_preamble(text);
     let text = remove_link_copied(&text);
@@ -437,6 +674,8 @@ fn process_text(text: &str) -> String {
     let text = fix_section_links(&text);
     let text = strip_github_blob_sha(&text);
     let text = sanitize_mermaid(&text);
+    let text = fix_table_content(&text);
+    let text = fix_long_lines(&text);
     text
 }
 
@@ -719,11 +958,16 @@ fn process_mermaid_for_pdf(text: &str, images_dir: &Path, prefix: &str) -> Strin
                 in_mermaid = false;
                 diagram_count += 1;
 
+                // Sanitize the mermaid content before rendering
+                let mermaid_lines: Vec<String> = mermaid_content.lines().map(|s| s.to_string()).collect();
+                let sanitized = sanitize_mermaid_block(&mermaid_lines);
+                let sanitized_content = sanitized.join("\n");
+
                 if has_mmdc {
                     let img_name = format!("{}-diagram-{}.png", prefix, diagram_count);
                     let img_path = images_dir.join(&img_name);
 
-                    match render_mermaid_to_png(&mermaid_content, &img_path) {
+                    match render_mermaid_to_png(&sanitized_content, &img_path) {
                         Ok(_) => {
                             result.push_str(&format!("\n![Diagram {}]({})\n\n",
                                 diagram_count, img_path.display()));
@@ -731,14 +975,14 @@ fn process_mermaid_for_pdf(text: &str, images_dir: &Path, prefix: &str) -> Strin
                         Err(e) => {
                             eprintln!("Warning: Failed to render mermaid diagram: {}", e);
                             result.push_str("\n```\n");
-                            result.push_str(&mermaid_content);
+                            result.push_str(&sanitized_content);
                             result.push_str("\n```\n\n");
                         }
                     }
                 } else {
                     // No mmdc available, keep as code block
                     result.push_str("\n```\n");
-                    result.push_str(&mermaid_content);
+                    result.push_str(&sanitized_content);
                     result.push_str("\n```\n\n");
                 }
                 mermaid_content.clear();
@@ -859,10 +1103,15 @@ fn convert_project_to_pdf(project_dir: &Path, pdf_dir: &Path) -> Result<PathBuf,
             md_path.to_str().unwrap(),
             "-o", pdf_path.to_str().unwrap(),
             "--pdf-engine=xelatex",
-            "-V", "geometry:margin=1in",
+            "-V", "geometry:margin=0.7in",
             "-V", "mainfont:Helvetica",
             "-V", "monofont:Menlo",
-            "-V", "fontsize=11pt",
+            "-V", "fontsize=9pt",
+            "-V", "papersize=a4",
+            "-V", "verbatim-font-size=8pt",
+            "-V", "fancyhdr=false",
+            "-V", "table-use-line-widths=true",
+            "-V", "tables=true",
             "-B", title_path.to_str().unwrap(),
             "--toc",
             "--toc-depth=2",
