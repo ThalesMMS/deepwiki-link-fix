@@ -497,7 +497,7 @@ fn fix_table_content(text: &str) -> String {
     let mut table_rows: Vec<String> = Vec::new();
     
     for line in text.lines() {
-        // Detectar tabelas markdown
+        // Detect Markdown tables
         if line.trim().starts_with('|') {
             if !in_table {
                 in_table = true;
@@ -510,7 +510,7 @@ fn fix_table_content(text: &str) -> String {
                 table_rows.push(line.to_string());
                 continue;
             } else {
-                // Fim da tabela
+                // End of table
                 in_table = false;
                 let fixed_table = fix_table_rows(&table_rows);
                 result.push_str(&fixed_table);
@@ -518,7 +518,7 @@ fn fix_table_content(text: &str) -> String {
                 table_rows.clear();
             }
         } else if in_table {
-            // Fim da tabela
+            // End of table
             in_table = false;
             let fixed_table = fix_table_rows(&table_rows);
             result.push_str(&fixed_table);
@@ -532,7 +532,7 @@ fn fix_table_content(text: &str) -> String {
         }
     }
     
-    // Se terminou com tabela aberta
+    // If the text ended with an open table
     if in_table && !table_rows.is_empty() {
         let fixed_table = fix_table_rows(&table_rows);
         result.push_str(&fixed_table);
@@ -551,13 +551,13 @@ fn fix_table_rows(rows: &[String]) -> String {
             
             for (i, col) in columns.iter().enumerate() {
                 if i == 0 || i == columns.len() - 1 {
-                    // Primeira e última coluna são vazias (antes/after do |)
+                    // The first and last columns are empty (before/after the |)
                     continue;
                 }
                 
                 let col_content = col.trim();
                 
-                // Quebrar colunas muito longas
+                // Wrap very long columns
                 if col_content.len() > 30 {
                     let words: Vec<&str> = col_content.split_whitespace().collect();
                     let mut current_line = String::new();
@@ -579,14 +579,14 @@ fn fix_table_rows(rows: &[String]) -> String {
                         lines.push(current_line);
                     }
                     
-                    // Juntar linhas com <br> para quebra no PDF
+                    // Join lines with <br> so they wrap in the PDF
                     fixed_columns.push(lines.join("<br>"));
                 } else {
                     fixed_columns.push(col_content.to_string());
                 }
             }
             
-            // Reconstruir linha da tabela
+            // Rebuild the table row
             result.push_str("|");
             for col in &fixed_columns {
                 result.push(' ');
@@ -595,7 +595,7 @@ fn fix_table_rows(rows: &[String]) -> String {
             }
             result.push('\n');
         } else {
-            // Linha de separação (|---|---|)
+            // Separator row (|---|---|)
             result.push_str(row);
             result.push('\n');
         }
@@ -606,11 +606,11 @@ fn fix_table_rows(rows: &[String]) -> String {
 
 fn fix_long_lines(text: &str) -> String {
     let mut result = String::new();
-    let max_line_length = 80; // Limite de caracteres por linha
+    let max_line_length = 80; // Character limit per line
     let mut in_code_block = false;
     
     for line in text.lines() {
-        // Detectar início/fim de blocos de código
+        // Detect the start/end of fenced code blocks
         if line.trim().starts_with("```") {
             in_code_block = !in_code_block;
             result.push_str(line);
@@ -618,11 +618,11 @@ fn fix_long_lines(text: &str) -> String {
             continue;
         }
         
-        // Para blocos de código, quebrar linhas muito longas
+        // For code blocks, wrap very long lines
         if in_code_block && line.len() > max_line_length {
-            // Para código, quebrar em pontos lógicos ou simplesmente no limite
+            // For code, break at logical points or simply at the limit
             if line.len() > max_line_length * 2 {
-                // Linhas extremamente longas - quebrar no limite
+                // Extremely long lines, break at the limit
                 for (i, chunk) in line.as_bytes().chunks(max_line_length).enumerate() {
                     if i > 0 {
                         result.push('\n');
@@ -635,7 +635,7 @@ fn fix_long_lines(text: &str) -> String {
                 result.push('\n');
             }
         } else if !in_code_block && line.len() > max_line_length {
-            // Texto normal - quebrar em palavras
+            // Normal text, wrap by words
             let words: Vec<&str> = line.split_whitespace().collect();
             let mut current_line = String::new();
             
