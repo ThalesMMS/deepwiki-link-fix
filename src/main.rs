@@ -1,10 +1,80 @@
 use clap::Parser;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
+
+// Link-handling regexes
+static INTERNAL_LINK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\]\((/[^)/\s]+/[^)/\s]+(?:/[^\s)]*)?)\)").unwrap());
+static REF_STYLE_LINK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)(^\s*\[[^\]]+\]:\s*)(/[^)/\s]+/[^)/\s]+(?:/[^\s)]*)?)").unwrap());
+static BLOB_SHA_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"https://github\.com/([^/]+)/([^/]+)/blob/([0-9a-f]{7,40})/").unwrap());
+static LINK_COPIED_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\s*Link copied!").unwrap());
+static MD_LINK_TARGET_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\]\(([^)]+)\)").unwrap());
+static SECTION_LINK_MAP: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
+    SECTION_ANCHORS
+        .iter()
+        .map(|(section, _)| {
+            let pattern = format!(
+                r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<sha>[0-9a-f]{{7,40}})/{}",
+                regex::escape(section)
+            );
+            (*section, Regex::new(&pattern).unwrap())
+        })
+        .collect()
+});
+
+static SECTION_ANCHORS: &[(&str, &str)] = &[
+    ("Networking Section", "networking-configuration"),
+    ("Virtual Environment Section", "virtual-environment-setup"),
+    ("Module Import Section", "module-import-issues"),
+    ("WSL.exe Section", "wslexe-issues"),
+    ("Path Translation Section", "path-translation-issues"),
+    ("Performance Section", "performance-optimization"),
+    ("Line Ending Section", "line-ending-issues"),
+    ("Distribution Section", "distribution-selection"),
+];
+static SECTION_ANCHOR_MAP: Lazy<HashMap<&'static str, &'static str>> =
+    Lazy::new(|| SECTION_ANCHORS.iter().copied().collect());
+
+// Mermaid-handling regexes
+static MERMAID_LIST_ITEM_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(?:\d+\.\s+|[-*+]\s+)").unwrap());
+static MERMAID_BR_SPLIT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<br\s*/?>").unwrap());
+static MERMAID_MD_LINK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[[^\]]+\]\([^)]+\)").unwrap());
+static MERMAID_URL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"https?://\S+").unwrap());
+static MERMAID_PARTICIPANT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(participant)\s+(.+)$").unwrap());
+static MERMAID_BROKEN_CONTENT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(\w+)\[broken-content\]\"\]"#).unwrap());
+static MERMAID_QUOTED_LABEL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\["(.*?)"\]"#).unwrap());
+static MERMAID_EDGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"^(?P<indent>\s*)(?P<src>[A-Za-z0-9_]+)\s*(?P<arrow>[-.=]+>)\s*(?:\|"(?P<label>[^"]*)"\|\s*)?(?P<dst>[A-Za-z0-9_]+)\s*$"#,
+    )
+    .unwrap()
+});
+static MERMAID_NODE_LABEL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\["(.*?)"\]"#).unwrap());
+
+// README/ordinal-handling regexes
+static README_MULTILINE_LINK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\]\([^)]*\n[^)]*\)").unwrap());
+static README_LIST_ITEM_LINK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*-\s+\[[^\]]+\]\(([^)]+)\)\s*$").unwrap());
+static ORDINAL_PREFIX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\d{2}-").unwrap());
 
 #[derive(Parser, Debug)]
 #[command(name = "fix-docs")]
@@ -36,17 +106,8 @@ struct Args {
 }
 
 // Section anchors mapping
-fn get_section_anchors() -> HashMap<&'static str, &'static str> {
-    let mut map = HashMap::new();
-    map.insert("Networking Section", "networking-configuration");
-    map.insert("Virtual Environment Section", "virtual-environment-setup");
-    map.insert("Module Import Section", "module-import-issues");
-    map.insert("WSL.exe Section", "wslexe-issues");
-    map.insert("Path Translation Section", "path-translation-issues");
-    map.insert("Performance Section", "performance-optimization");
-    map.insert("Line Ending Section", "line-ending-issues");
-    map.insert("Distribution Section", "distribution-selection");
-    map
+fn get_section_anchors() -> &'static HashMap<&'static str, &'static str> {
+    &SECTION_ANCHOR_MAP
 }
 
 const BRANCH_LABELS: &[&str] = &["yes", "no", "true", "false"];
@@ -70,14 +131,11 @@ struct Edge {
 }
 
 fn fix_internal_links(text: &str) -> String {
-    let internal_link_re = Regex::new(r"\]\((/[^)/\s]+/[^)/\s]+(?:/[^\s)]*)?)\)").unwrap();
-    let ref_style_re = Regex::new(r"(?m)(^\s*\[[^\]]+\]:\s*)(/[^)/\s]+/[^)/\s]+(?:/[^\s)]*)?)").unwrap();
-    
-    let text = internal_link_re.replace_all(text, |caps: &regex::Captures| {
+    let text = INTERNAL_LINK_RE.replace_all(text, |caps: &regex::Captures| {
         format!("](https://github.com{})", &caps[1])
     });
     
-    let text = ref_style_re.replace_all(&text, |caps: &regex::Captures| {
+    let text = REF_STYLE_LINK_RE.replace_all(&text, |caps: &regex::Captures| {
         format!("{}https://github.com{}", &caps[1], &caps[2])
     });
     
@@ -88,12 +146,8 @@ fn fix_section_links(text: &str) -> String {
     let section_anchors = get_section_anchors();
     let mut result = text.to_string();
     
-    for (section, anchor) in section_anchors {
-        let pattern = format!(
-            r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<sha>[0-9a-f]{{7,40}})/{}",
-            regex::escape(section)
-        );
-        let re = Regex::new(&pattern).unwrap();
+    for (section, re) in SECTION_LINK_MAP.iter() {
+        let anchor = section_anchors.get(section).unwrap();
         result = re.replace_all(&result, |caps: &regex::Captures| {
             format!(
                 "https://github.com/{}/{}/blob/{}/README.md#{}",
@@ -106,8 +160,7 @@ fn fix_section_links(text: &str) -> String {
 }
 
 fn strip_github_blob_sha(text: &str) -> String {
-    let re = Regex::new(r"https://github\.com/([^/]+)/([^/]+)/blob/([0-9a-f]{7,40})/").unwrap();
-    re.replace_all(text, "https://github.com/$1/$2/").to_string()
+    BLOB_SHA_RE.replace_all(text, "https://github.com/$1/$2/").to_string()
 }
 
 fn strip_preamble(text: &str) -> String {
@@ -134,8 +187,7 @@ fn strip_preamble(text: &str) -> String {
 }
 
 fn remove_link_copied(text: &str) -> String {
-    let re = Regex::new(r"\s*Link copied!").unwrap();
-    re.replace_all(text, "").to_string()
+    LINK_COPIED_RE.replace_all(text, "").to_string()
 }
 
 fn remove_ask_devin_lines(text: &str) -> String {
@@ -158,13 +210,9 @@ fn fix_literal_backslash_n(text: &str) -> String {
 }
 
 fn contains_list_marker(label: &str) -> bool {
-    let list_item_re = Regex::new(r"^\s*(?:\d+\.\s+|[-*+]\s+)").unwrap();
-    let parts: Vec<&str> = Regex::new(r"<br\s*/?>")
-        .unwrap()
-        .split(label)
-        .collect();
+    let parts: Vec<&str> = MERMAID_BR_SPLIT_RE.split(label).collect();
     for part in parts {
-        if list_item_re.is_match(part.trim()) {
+        if MERMAID_LIST_ITEM_RE.is_match(part.trim()) {
             return true;
         }
     }
@@ -175,21 +223,18 @@ fn sanitize_label(label: &str) -> String {
     if contains_list_marker(label) {
         return "Unsupported markdown: list".to_string();
     }
-    let md_link_re = Regex::new(r"\[[^\]]+\]\([^)]+\)").unwrap();
-    let url_re = Regex::new(r"https?://\S+").unwrap();
-    let result = md_link_re.replace_all(label, "Unsupported markdown: link");
-    let result = url_re.replace_all(&result, "Unsupported markdown: link");
+    let result = MERMAID_MD_LINK_RE.replace_all(label, "Unsupported markdown: link");
+    let result = MERMAID_URL_RE.replace_all(&result, "Unsupported markdown: link");
     result.to_string()
 }
 
 fn fix_sequence_diagram_participants(lines: &[String]) -> Vec<String> {
-    let participant_re = Regex::new(r"^\s*(participant)\s+(.+)$").unwrap();
     let mut participant_aliases: HashMap<String, String> = HashMap::new();
     let mut result: Vec<String> = Vec::new();
     
     // First pass: identify participants with spaces and create aliases
     for line in lines {
-        if let Some(caps) = participant_re.captures(line) {
+        if let Some(caps) = MERMAID_PARTICIPANT_RE.captures(line) {
             let original_name = caps.get(2).unwrap().as_str().trim();
             if original_name.contains(' ') || original_name.contains('-') {
                 // Create safe alias
@@ -206,7 +251,7 @@ fn fix_sequence_diagram_participants(lines: &[String]) -> Vec<String> {
         let mut new_line = line.clone();
         
         // Replace participant declarations
-        if let Some(caps) = participant_re.captures(&new_line) {
+        if let Some(caps) = MERMAID_PARTICIPANT_RE.captures(&new_line) {
             let original_name = caps.get(2).unwrap().as_str().trim();
             if let Some(safe_alias) = participant_aliases.get(original_name) {
                 new_line = format!("  participant {} as {}", safe_alias, original_name);
@@ -226,12 +271,10 @@ fn fix_sequence_diagram_participants(lines: &[String]) -> Vec<String> {
 
 fn fix_malformed_nodes(lines: &[String]) -> Vec<String> {
     // Fix patterns like INPUTENC[broken-content]"] - specific to broken DeepWiki exports
-    let broken_re = Regex::new(r#"(\w+)\[broken-content\]\"\]"#).unwrap();
-    
     lines
         .iter()
         .map(|line| {
-            broken_re.replace_all(line, |caps: &regex::Captures| {
+            MERMAID_BROKEN_CONTENT_RE.replace_all(line, |caps: &regex::Captures| {
                 let node_id = &caps[1];
                 // Replace with node ID as the label
                 format!(r#"{}["{}"]"#, node_id, node_id)
@@ -241,11 +284,10 @@ fn fix_malformed_nodes(lines: &[String]) -> Vec<String> {
 }
 
 fn sanitize_node_labels(lines: &[String]) -> Vec<String> {
-    let node_label_re = Regex::new(r#"\["(.*?)"\]"#).unwrap();
     lines
         .iter()
         .map(|line| {
-            node_label_re.replace_all(line, |caps: &regex::Captures| {
+            MERMAID_QUOTED_LABEL_RE.replace_all(line, |caps: &regex::Captures| {
                 let label = &caps[1];
                 format!("[\"{}\"]", sanitize_label(label))
             }).to_string()
@@ -342,16 +384,11 @@ fn choose_edge(
 }
 
 fn move_branch_labels(lines: &mut Vec<String>) {
-    let edge_re = Regex::new(
-        r#"^(?P<indent>\s*)(?P<src>[A-Za-z0-9_]+)\s*(?P<arrow>[-.=]+>)\s*(?:\|"(?P<label>[^"]*)"\|\s*)?(?P<dst>[A-Za-z0-9_]+)\s*$"#
-    ).unwrap();
-    let node_label_re = Regex::new(r#"\["(.*?)"\]"#).unwrap();
-    
     let mut edges: Vec<Edge> = Vec::new();
     let mut node_labels: HashMap<String, String> = HashMap::new();
     
     for (idx, line) in lines.iter().enumerate() {
-        if let Some(label_match) = node_label_re.captures(line) {
+        if let Some(label_match) = MERMAID_NODE_LABEL_RE.captures(line) {
             let label = label_match.get(1).unwrap().as_str();
             let prefix = line.split("[\"").next().unwrap_or("").trim();
             if !prefix.is_empty() {
@@ -359,7 +396,7 @@ fn move_branch_labels(lines: &mut Vec<String>) {
             }
         }
         
-        if let Some(caps) = edge_re.captures(line) {
+        if let Some(caps) = MERMAID_EDGE_RE.captures(line) {
             edges.push(Edge {
                 line_idx: idx,
                 indent: caps.name("indent").map_or("", |m| m.as_str()).to_string(),
@@ -686,16 +723,14 @@ fn parse_readme_index(readme_path: &Path) -> Vec<String> {
     };
     
     // Fix broken links by removing newlines within markdown links
-    let broken_link_re = Regex::new(r"\]\([^)]*\n[^)]*\)").unwrap();
-    let text = broken_link_re.replace_all(&text, |caps: &regex::Captures| {
+    let text = README_MULTILINE_LINK_RE.replace_all(&text, |caps: &regex::Captures| {
         caps[0].replace('\n', "")
     });
     
-    let line_re = Regex::new(r"^\s*-\s+\[[^\]]+\]\(([^)]+)\)\s*$").unwrap();
     let mut items = Vec::new();
     
     for line in text.lines() {
-        if let Some(caps) = line_re.captures(line) {
+        if let Some(caps) = README_LIST_ITEM_LINK_RE.captures(line) {
             let target = caps.get(1).unwrap().as_str();
             if target.starts_with("http://") || target.starts_with("https://") {
                 continue;
@@ -712,7 +747,6 @@ fn parse_readme_index(readme_path: &Path) -> Vec<String> {
 
 fn build_ordinal_mapping(readme_path: &Path) -> HashMap<String, String> {
     let items = parse_readme_index(readme_path);
-    let numbered_re = Regex::new(r"^\d{2}-").unwrap();
     let mut mapping = HashMap::new();
     
     for (idx, target) in items.iter().enumerate() {
@@ -722,7 +756,7 @@ fn build_ordinal_mapping(readme_path: &Path) -> HashMap<String, String> {
             .unwrap_or("");
         
         // Skip if already numbered
-        if numbered_re.is_match(filename) {
+        if ORDINAL_PREFIX_RE.is_match(filename) {
             continue;
         }
         
@@ -744,9 +778,7 @@ fn build_ordinal_mapping(readme_path: &Path) -> HashMap<String, String> {
 }
 
 fn rewrite_markdown_links(text: &str, mapping: &HashMap<String, String>) -> String {
-    let link_re = Regex::new(r"\]\(([^)]+)\)").unwrap();
-    
-    link_re.replace_all(text, |caps: &regex::Captures| {
+    MD_LINK_TARGET_RE.replace_all(text, |caps: &regex::Captures| {
         let target = caps.get(1).unwrap().as_str();
         
         if target.starts_with("http://") || target.starts_with("https://") {
